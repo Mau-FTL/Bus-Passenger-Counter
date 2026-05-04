@@ -51,10 +51,14 @@ If GPS is enabled (see below), the stop sidebar is hidden because GPS coordinate
 A driver can tap **Enable GPS** to begin continuous location tracking. When active:
 
 - Each log entry is automatically tagged with latitude, longitude, and accuracy (in meters)
+- The app continuously matches the bus's position against the stops on the current route and auto-selects the nearest one (within a configurable radius, default 10 meters)
+- The current stop sidebar updates in real time to show the matched stop and the distance to it
+- Log entries are tagged with both the GPS coordinates *and* the matched stop ID/name when the bus is within range
+- When the bus is between stops or off route, the sidebar shows "No nearby stop" and entries are tagged with GPS coordinates only, never a falsely matched stop
 - A status indicator shows the current GPS state with a colored dot (gray = off, green = active, red = error)
 - Coordinates appear in the activity log as clickable Google Maps links
 
-GPS is fully optional. When it's off, entries are tagged with the manually selected stop instead. The driver can toggle GPS on or off at any time during the shift.
+GPS is fully optional. With GPS off, the driver navigates the stop list manually using the prev/next arrows in the sidebar, and entries are tagged with whichever stop is currently displayed. The driver can toggle GPS on or off at any time during the shift; the matching radius can be tuned in `index.html` (see [Customizing for a Specific Agency](#customizing-for-a-specific-agency)).
 
 ### Activity Log
 
@@ -114,12 +118,50 @@ The trip info fields (bus, driver, route) and the theme preference are the only 
 
 ## Customizing for a Specific Agency
 
-The tool ships as a generic template with three placeholder buses, three placeholder routes, and three placeholder stops per route. To deploy it for a specific agency, edit two areas of `index.html`:
+The tool ships as a generic template with three placeholder buses, three placeholder routes, and three placeholder stops per route. To deploy it for a specific agency, edit one place: the `agencyData` object near the top of the `<script>` tag in `index.html`. Everything else (the bus and route dropdowns, the stop sidebar, the nearest-stop matching) is built from this object at startup.
 
-1. **The bus and route dropdowns** in the HTML, replacing the `Bus 1 / Bus 2 / Bus 3` and `Route 1 / Route 2 / Route 3` options with the agency's actual fleet and route names.
-2. **The `stopsByGroup` and `routeToGroup` objects** in the JavaScript, replacing the placeholder stops with the agency's real stop lists. Each stop has an `id` (used in the CSV export) and a `name` (shown to the driver). If multiple route variants share a stop list, they can map to the same group key.
+The structure looks like this:
 
-The app's logic, layout, and styling do not need to change for a new agency, only the data.
+```javascript
+const agencyData = {
+  buses: [
+    'Bus 1',
+    'Bus 2',
+    'Bus 3'
+  ],
+  routeGroups: {
+    'Group 1': {
+      routes: ['Route 1'],
+      stops: [
+        { id: '101', name: 'Stop 1', lat: 26.1224, lng: -80.1373 },
+        { id: '102', name: 'Stop 2', lat: 26.1230, lng: -80.1380 },
+        { id: '103', name: 'Stop 3', lat: 26.1236, lng: -80.1387 }
+      ]
+    }
+  }
+};
+```
+
+Each piece:
+
+- **`buses`** is the list of bus identifiers shown in the Bus # dropdown. Use whatever the agency uses internally (fleet numbers, names, or a mix).
+- **`routeGroups`** is keyed by group name. Each group contains:
+  - **`routes`** is the list of route names shown in the Route dropdown. Multiple routes in one group share the same stop list, useful when several route variants run the same physical loop. If every route has its own unique stops, just put one route per group.
+  - **`stops`** is the ordered sequence of stops the bus visits. Each stop has an `id` (used in the CSV export), a `name` (shown to the driver), and optionally a `lat` and `lng` (decimal degrees). Stops without coordinates still work; they're skipped during nearest-stop matching but appear in the sidebar like normal.
+
+### Stop matching radius
+
+When GPS is enabled, the app auto-selects the nearest stop on the current route, but only if the bus is within a defined radius. That radius is set by a constant just above `agencyData`:
+
+```javascript
+const STOP_MATCH_RADIUS_METERS = 10;
+```
+
+The default of 10 meters is tight; it requires the bus to be essentially parked at the stop. If drivers report the app showing "No nearby stop" while clearly at a stop (which can happen with weak GPS signal in urban canyons or under tree cover), increase this value to 25 or 50 meters. Going much above 50 meters risks false matches in dense networks where stops are close together.
+
+### What does not need to change
+
+The app's logic, layout, styling, and behavior are agency-agnostic. Customization is data-only.
 
 ## Browser and Device Requirements
 
