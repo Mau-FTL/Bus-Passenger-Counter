@@ -201,6 +201,13 @@
     cursor: not-allowed;
     background: var(--bg-subtle);
   }
+  /* Shown under the current-stop card when GPS is auto-selecting the stop */
+  .stop-distance {
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 0.85rem;
+    padding: 8px 0;
+  }
   .counter-card {
     background: var(--bg-subtle);
     border: 1px solid var(--border-soft);
@@ -295,6 +302,14 @@
   .trip-field select.invalid {
     border-color: var(--red-1);
     background: var(--invalid-bg);
+  }
+  /* Locked styling for Bus # and Route once the shift has activity logged.
+     Visually distinct from "you forgot to fill this in" (.invalid) so the
+     driver doesn't confuse the two states. */
+  .trip-field select:disabled {
+    opacity: 0.6;
+    background: var(--bg-subtle);
+    cursor: not-allowed;
   }
   .trip-field-full { flex-basis: 100%; }
   h1 { color: var(--text-primary); margin-bottom: 10px; font-size: 1.5rem; }
@@ -425,15 +440,13 @@
     <!-- MAIN COLUMN: trip info form, passenger count, action buttons, log -->
     <div class="main">
       <!-- Trip info: bus #, driver name, route. All three are required before
-           any boarding action can be logged see validateTripInfo(). -->
+           any boarding action can be logged (see validateTripInfo()). -->
       <div class="trip-info">
     <div class="trip-field trip-field-full">
       <label for="busNumber">Bus #</label>
       <select id="busNumber">
         <option value="">Select bus...</option>
-        <option>Bus 1</option>
-        <option>Bus 2</option>
-        <option>Bus 3</option>
+        <!-- Bus options populated from agencyData.buses at startup -->
       </select>
     </div>
     <div class="trip-field">
@@ -444,9 +457,7 @@
       <label for="route">Route</label>
       <select id="route">
         <option value="">Select route...</option>
-        <option>Route 1</option>
-        <option>Route 2</option>
-        <option>Route 3</option>
+        <!-- Route options populated from agencyData.routeGroups at startup -->
       </select>
     </div>
   </div>
@@ -528,6 +539,7 @@
   let watchId = null;        // ID returned by geolocation.watchPosition; null when GPS off
   let selectedStop = null;   // The stop the bus is currently at: { id, name, idx } or null
   let stopIndex = 0;         // Position in the current route's stop list (drives nav arrows)
+  let gpsOutOfRange = false; // When GPS is on but no stop is within the match radius
   let wheelchairCount = 0;   // Total wheelchair boardings this shift
   let bicycleCount = 0;      // Total bicycle boardings this shift
 
@@ -560,44 +572,109 @@
   routeEl.addEventListener('change', () => localStorage.setItem('route', routeEl.value));
 
   // ============================================================
-  // ROUTE & STOP DATA (CUSTOMIZE HERE FOR YOUR CITY)
+  // AGENCY DATA (CUSTOMIZE HERE FOR YOUR CITY)
   // ============================================================
-  // `stopsByGroup` defines the ordered list of stops for each route group.
-  // Each stop has an `id` (string, used in the CSV export) and a `name`
-  // (shown to the driver). Order matters - it's the sequence drivers
-  // navigate through using the prev/next arrows.
+  // Single source of truth for the bus fleet, routes, and stops.
+  // The dropdowns and stop sidebar are all built from this object at
+  // startup, so this is the only place to edit when deploying to a new
+  // agency. The structure matches the agency-data.json template:
   //
-  // The "group" indirection (vs. mapping directly from route to stops)
-  // exists so multiple route variants can share one stop list - e.g. if
-  // "Beach Link 1" and "Beach Link 2" both run the same physical loop,
-  // they can both point at the same group.
-  const stopsByGroup = {
-    'Route 1': [
-      { id: '101', name: 'Stop 1' },
-      { id: '102', name: 'Stop 2' },
-      { id: '103', name: 'Stop 3' }
+  //   buses: ........... array of bus identifiers shown in the Bus # dropdown
+  //   routeGroups: ..... object keyed by group name. Each group has:
+  //     routes: ........ array of route names shown in the Route dropdown
+  //     stops: ......... ordered array of stops the driver navigates through
+  //                      with the prev/next arrows. Each stop has:
+  //                        id ..... string used in the CSV export
+  //                        name ... display label shown to the driver
+  //                        lat .... latitude (decimal degrees, optional)
+  //                        lng .... longitude (decimal degrees, optional)
+  //                      lat/lng power the auto-select-nearest-stop feature
+  //                      when GPS is enabled. Stops missing them are simply
+  //                      skipped during nearest-stop matching.
+  //
+  // Why "groups": multiple route variants that share a stop list (e.g.
+  // "Beach Link 1" and "Beach Link 2" running the same loop) live under
+  // one group, so the stop list only has to be defined once.
+
+  // How close (in meters) the bus must be to a stop for GPS auto-select
+  // to consider it a match. If the closest stop is farther than this, the
+  // app reports "no nearby stop" instead of falsely claiming the bus is
+  // at a far-away one. 10m is tight - typical consumer GPS accuracy is
+  // ±5-15m on a good fix, so a driver parked exactly at a stop will
+  // usually match. Loosen this (e.g. to 25-50m) if drivers report
+  // frequent "no nearby stop" while clearly at the stop.
+  const STOP_MATCH_RADIUS_METERS = 10;
+
+  const agencyData = {
+    buses: [
+      'Bus 1',
+      'Bus 2',
+      'Bus 3'
     ],
-    'Route 2': [
-      { id: '201', name: 'Stop 1' },
-      { id: '202', name: 'Stop 2' },
-      { id: '203', name: 'Stop 3' }
-    ],
-    'Route 3': [
-      { id: '301', name: 'Stop 1' },
-      { id: '302', name: 'Stop 2' },
-      { id: '303', name: 'Stop 3' }
-    ]
+    routeGroups: {
+      'Group 1': {
+        routes: ['Route 1'],
+        stops: [
+          { id: '101', name: 'Stop 1', lat: 26.1224, lng: -80.1373 },
+          { id: '102', name: 'Stop 2', lat: 26.1230, lng: -80.1380 },
+          { id: '103', name: 'Stop 3', lat: 26.1236, lng: -80.1387 }
+        ]
+      },
+      'Group 2': {
+        routes: ['Route 2'],
+        stops: [
+          { id: '201', name: 'Stop 1', lat: 26.1242, lng: -80.1394 },
+          { id: '202', name: 'Stop 2', lat: 26.1248, lng: -80.1401 },
+          { id: '203', name: 'Stop 3', lat: 26.1254, lng: -80.1408 }
+        ]
+      },
+      'Group 3': {
+        routes: ['Route 3'],
+        stops: [
+          { id: '301', name: 'Stop 1', lat: 26.1260, lng: -80.1415 },
+          { id: '302', name: 'Stop 2', lat: 26.1266, lng: -80.1422 },
+          { id: '303', name: 'Stop 3', lat: 26.1272, lng: -80.1429 }
+        ]
+      }
+    }
   };
 
-  // Maps each route name (the value of the route <select>) to a key in
-  // stopsByGroup. Multiple routes can map to the same group if they share
-  // a stop list. The route name on the left MUST match a route <option>
-  // in the HTML exactly.
-  const routeToGroup = {
-    'Route 1': 'Route 1',
-    'Route 2': 'Route 2',
-    'Route 3': 'Route 3'
-  };
+  // ----- Derive lookup maps and populate dropdowns from agencyData -----
+  // We keep the same `stopsByGroup` and `routeToGroup` shapes the rest of
+  // the code already expects, so nothing downstream has to change.
+
+  // stopsByGroup: { groupName: [stops...] }
+  const stopsByGroup = {};
+  // routeToGroup: { routeName: groupName }
+  const routeToGroup = {};
+  // Ordered list of route names for populating the Route dropdown
+  const allRoutes = [];
+
+  Object.keys(agencyData.routeGroups).forEach(groupName => {
+    const group = agencyData.routeGroups[groupName];
+    stopsByGroup[groupName] = group.stops;
+    group.routes.forEach(routeName => {
+      routeToGroup[routeName] = groupName;
+      allRoutes.push(routeName);
+    });
+  });
+
+  // Helper: append <option> elements to a <select> from an array of strings
+  function populateSelect(selectEl, items) {
+    items.forEach(item => {
+      const opt = document.createElement('option');
+      opt.textContent = item;
+      selectEl.appendChild(opt);
+    });
+  }
+  populateSelect(busNumberEl, agencyData.buses);
+  populateSelect(routeEl, allRoutes);
+
+  // localStorage values were read into the <select> .value before the
+  // <option>s existed. Re-apply them now that the options are present so
+  // the saved bus/route actually shows as selected on reload.
+  busNumberEl.value = localStorage.getItem('busNumber') || '';
+  routeEl.value = localStorage.getItem('route') || '';
 
   // ============================================================
   // STOP NAVIGATION
@@ -608,6 +685,49 @@
   function getCurrentStops() {
     const group = routeToGroup[routeEl.value];
     return group ? (stopsByGroup[group] || []) : [];
+  }
+
+  // Haversine distance in meters between two lat/lng points.
+  // Used to find the closest stop to the device's current GPS reading.
+  // We only need relative distances, so we could skip the final multiply
+  // by Earth's radius, but keeping meters makes the math easy to debug.
+  function haversineMeters(lat1, lng1, lat2, lng2) {
+    const R = 6371000; // Earth radius in meters
+    const toRad = (deg) => deg * Math.PI / 180;
+    const dLat = toRad(lat2 - lat1);
+    const dLng = toRad(lng2 - lng1);
+    const a = Math.sin(dLat / 2) ** 2 +
+              Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+              Math.sin(dLng / 2) ** 2;
+    return 2 * R * Math.asin(Math.sqrt(a));
+  }
+
+  // Given a GPS position, returns the index of the closest stop on the
+  // current route, IF that stop is within STOP_MATCH_RADIUS_METERS. Returns
+  // -1 in three cases:
+  //   1. No route is selected (empty stop list)
+  //   2. None of the route's stops have lat/lng defined
+  //   3. The closest stop is farther than the match radius (bus is between
+  //      stops, off-route, or GPS drift put us out of range)
+  // Stops missing lat or lng are skipped during the search, so partially
+  // geocoded route data still works rather than crashing.
+  function findNearestStopIndex(lat, lng) {
+    const list = getCurrentStops();
+    let bestIdx = -1;
+    let bestDist = Infinity;
+    for (let i = 0; i < list.length; i++) {
+      const s = list[i];
+      if (typeof s.lat !== 'number' || typeof s.lng !== 'number') continue;
+      const d = haversineMeters(lat, lng, s.lat, s.lng);
+      if (d < bestDist) {
+        bestDist = d;
+        bestIdx = i;
+      }
+    }
+    // Range gate: even if we found a closest stop, return -1 if we're not
+    // actually within the match radius of it.
+    if (bestDist > STOP_MATCH_RADIUS_METERS) return -1;
+    return bestIdx;
   }
 
   // Renders the "Current Stop" sidebar card and prev/next arrows based on
@@ -621,19 +741,50 @@
       stopListEl.innerHTML = '<div class="stop-card empty">Select a route to see stops</div>';
       return;
     }
+
+    // GPS is on but no stop is within STOP_MATCH_RADIUS_METERS. Show an
+    // "off-route" indicator and clear selectedStop so log entries created
+    // while out of range aren't falsely tagged with a stop ID.
+    if (gpsOutOfRange) {
+      sidebarHeading.textContent = 'Current Stop';
+      stopListEl.innerHTML =
+        '<div class="stop-card empty">No nearby stop</div>' +
+        '<div class="stop-distance">Bus is between stops or off route</div>';
+      selectedStop = null;
+      return;
+    }
+
     // Defensive: keep stopIndex within bounds in case the stops list
     // shrank since last render (e.g. the driver switched routes).
     if (stopIndex < 0) stopIndex = 0;
     if (stopIndex >= list.length) stopIndex = list.length - 1;
     const stop = list[stopIndex];
+
+    // When GPS is on we hide the manual nav arrows because the stop is
+    // auto-updated from GPS. A driver who needs to override should turn
+    // GPS off briefly. We also show the distance to the matched stop
+    // for operational confidence ("am I really at the stop the app says?").
+    const gpsOn = watchId !== null && lastPosition !== null;
+    let extraHtml = '';
+    if (gpsOn && typeof stop.lat === 'number' && typeof stop.lng === 'number') {
+      const distMeters = Math.round(
+        haversineMeters(lastPosition.lat, lastPosition.lng, stop.lat, stop.lng)
+      );
+      extraHtml = '<div class="stop-distance">~' + distMeters + 'm away (auto from GPS)</div>';
+    } else if (!gpsOn) {
+      // Manual mode - show the prev/next arrows
+      extraHtml =
+        '<div class="stop-nav">' +
+          '<button class="nav-btn" id="navPrev"' + (stopIndex === 0 ? ' disabled' : '') + '>&larr;</button>' +
+          '<button class="nav-btn" id="navNext"' + (stopIndex === list.length - 1 ? ' disabled' : '') + '>&rarr;</button>' +
+        '</div>';
+    }
+
     stopListEl.innerHTML =
       '<div class="stop-card">' +
         '<div class="stop-name">' + stop.name + '</div>' +
       '</div>' +
-      '<div class="stop-nav">' +
-        '<button class="nav-btn" id="navPrev"' + (stopIndex === 0 ? ' disabled' : '') + '>&larr;</button>' +
-        '<button class="nav-btn" id="navNext"' + (stopIndex === list.length - 1 ? ' disabled' : '') + '>&rarr;</button>' +
-      '</div>';
+      extraHtml;
     sidebarHeading.textContent = stop.id ? 'Current Stop: ' + stop.id : 'Current Stop';
     // Sync selectedStop so the next log entry uses the displayed stop
     selectedStop = { id: stop.id, name: stop.name, idx: stopIndex };
@@ -658,6 +809,7 @@
   routeEl.addEventListener('change', () => {
     stopIndex = 0;
     selectedStop = null;
+    gpsOutOfRange = false;
     renderStops();
   });
 
@@ -692,7 +844,6 @@
       return;
     }
     setGpsStatus('', 'Requesting location...');
-    sidebarEl.classList.add('hidden');
     watchId = navigator.geolocation.watchPosition(
       (pos) => {
         // Success callback - fires every time the device gets a new fix
@@ -703,12 +854,29 @@
         };
         setGpsStatus('active', 'GPS active (accuracy ' + Math.round(pos.coords.accuracy) + 'm)');
         btnGps.textContent = 'Disable GPS';
+        // Auto-select the nearest stop on the current route. findNearestStopIndex
+        // returns -1 if no stop is within STOP_MATCH_RADIUS_METERS, in which case
+        // we flag the bus as "between stops" so renderStops can show that state
+        // and clear selectedStop (so log entries aren't tagged with a stop ID).
+        const nearestIdx = findNearestStopIndex(lastPosition.lat, lastPosition.lng);
+        if (nearestIdx === -1) {
+          gpsOutOfRange = true;
+        } else {
+          gpsOutOfRange = false;
+          stopIndex = nearestIdx;
+        }
+        // Re-render the stop sidebar to reflect the new nearest stop and
+        // distance, or the "no nearby stop" state when out of range.
+        renderStops();
       },
       (err) => {
         // Error callback - permission denied, timeout, position unavailable
         setGpsStatus('error', 'GPS error: ' + err.message);
         lastPosition = null;
-        sidebarEl.classList.remove('hidden');
+        gpsOutOfRange = false;
+        // Re-render so the manual nav arrows come back (we're effectively in
+        // manual mode again until GPS recovers or the driver disables it).
+        renderStops();
       },
       // enableHighAccuracy: prefer GPS over wifi/cell; maximumAge: accept
       // a cached fix up to 5s old; timeout: give up after 15s on first fix
@@ -716,17 +884,18 @@
     );
   }
 
-  // Stops the GPS watcher and shows the stop sidebar again so the driver
-  // can manually tag entries with a stop instead.
+  // Stops the GPS watcher. Sidebar stays visible (it always does now);
+  // we just re-render so the manual prev/next arrows reappear.
   function stopGps() {
     if (watchId !== null) {
       navigator.geolocation.clearWatch(watchId);
       watchId = null;
     }
     lastPosition = null;
+    gpsOutOfRange = false;
     setGpsStatus('', 'GPS off');
     btnGps.textContent = 'Enable GPS';
-    sidebarEl.classList.remove('hidden');
+    renderStops();
   }
 
   // ============================================================
@@ -741,13 +910,21 @@
     wheelchairCountEl.textContent = wheelchairCount;
     bicycleCountEl.textContent = bicycleCount;
 
-    // Button enable/disable rules:
+    // Button and field enable/disable rules:
     //   Undo: nothing to undo if log is empty
     //   Exit: can't exit a passenger if no one is on the bus
     //   End Shift: can only end when count is 0 (everyone has exited)
+    //   Bus # and Route: lock once activity is logged. A shift is one driver
+    //     on one bus on one route; changing either mid-shift would create
+    //     CSV rows with mismatched metadata. End Shift unlocks them by
+    //     emptying the log. Driver Name stays editable for typo fixes or
+    //     a relief driver swap during a break.
+    const shiftInProgress = log.length > 0;
     document.getElementById('btnUndo').disabled = log.length === 0;
     document.getElementById('btnOff').disabled = count <= 0;
     document.getElementById('btnEndShift').disabled = count !== 0;
+    busNumberEl.disabled = shiftInProgress;
+    routeEl.disabled = shiftInProgress;
 
     if (log.length === 0) {
       logListEl.innerHTML = '<div class="empty">No activity yet</div>';
@@ -760,16 +937,25 @@
       const stopLabel = entry.stop
         ? (entry.stopId ? entry.stopId + ' - ' + entry.stop : entry.stop)
         : '';
-      // If GPS coords are present, show a clickable Google Maps link.
-      // Otherwise fall back to "GPS off · <stop>" or a plain "GPS off" message.
-      const coordsHtml = entry.lat != null
-        ? '<div class="log-coords"><a href="https://www.google.com/maps?q=' +
+      // Build the location line under each log row. Four possible shapes:
+      //   GPS + stop  -> "Stop · GPS link"  (auto-select-nearest mode)
+      //   GPS only    -> "GPS link"         (route had no lat/lng on stops)
+      //   stop only   -> "GPS off · Stop"
+      //   neither     -> "GPS off · No stop selected"
+      let coordsHtml;
+      if (entry.lat != null) {
+        const gpsLink = '<a href="https://www.google.com/maps?q=' +
           entry.lat + ',' + entry.lng + '" target="_blank">' +
           entry.lat.toFixed(5) + ', ' + entry.lng.toFixed(5) +
-          ' (±' + Math.round(entry.accuracy) + 'm)</a></div>'
-        : stopLabel
-          ? '<div class="log-coords">GPS off &middot; ' + stopLabel + '</div>'
-          : '<div class="log-coords">GPS off &middot; No stop selected</div>';
+          ' (±' + Math.round(entry.accuracy) + 'm)</a>';
+        coordsHtml = stopLabel
+          ? '<div class="log-coords">' + stopLabel + ' &middot; ' + gpsLink + '</div>'
+          : '<div class="log-coords">' + gpsLink + '</div>';
+      } else if (stopLabel) {
+        coordsHtml = '<div class="log-coords">GPS off &middot; ' + stopLabel + '</div>';
+      } else {
+        coordsHtml = '<div class="log-coords">GPS off &middot; No stop selected</div>';
+      }
       // Map internal entry type to a display label and CSS color class
       let actionText, actionClass;
       if (entry.type === 'on') { actionText = 'Boarded'; actionClass = 'on'; }
