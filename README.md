@@ -22,6 +22,8 @@ Three required fields at the top of the screen identify the shift:
 
 All three must be filled in before any boarding action can be logged. If a driver taps a button without completing these fields, the missing fields are highlighted in red and an alert lists what's needed. Once a value is entered, it persists across page reloads on that device so the driver doesn't have to retype it for every shift.
 
+Once the first passenger boarding (or any other entry) is logged, the **Bus #** and **Route** fields lock for the rest of the shift. This prevents accidentally producing a CSV with mismatched metadata, where some rows belong to one route and others to another. **Driver Name** stays editable throughout the shift to allow for typo corrections or a relief driver swap during a break. The locked fields re-enable when the shift ends (via End Shift) or when the activity log is fully cleared via Undo.
+
 ### Passenger Boarding and Exit
 
 Two large, color-coded buttons are the primary controls:
@@ -42,9 +44,12 @@ Each tap increments the running total displayed on the card and adds an entry to
 
 ### Stop Navigation
 
-When a route is selected, the left sidebar shows the current stop. Drivers can navigate forward and backward through the route's stop list using the arrow buttons. The displayed stop is automatically attached to any boarding or exit entries the driver logs while at that stop.
+When a route is selected, the left sidebar shows the current stop. Behavior depends on whether GPS is enabled:
 
-If GPS is enabled (see below), the stop sidebar is hidden because GPS coordinates are assumed to be the location source for entries.
+- **GPS off (manual mode):** The driver navigates forward and backward through the route's stop list using prev/next arrow buttons. The displayed stop is attached to any boarding or exit entries logged while at that stop.
+- **GPS on (auto mode):** The arrows are hidden and the sidebar updates automatically to show the nearest stop based on the bus's current GPS position. A small distance readout under the stop name confirms the match (e.g. "~7m away (auto from GPS)"). When the bus is between stops or off route, the sidebar shows "No nearby stop" and log entries created in that state are not tagged with a stop ID.
+
+The matching radius, how close the bus must be for auto-mode to consider it a match, defaults to 10 meters and can be tuned per agency. See [Customizing for a Specific Agency](#customizing-for-a-specific-agency) for details.
 
 ### GPS Tracking (Optional)
 
