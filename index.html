@@ -1,0 +1,981 @@
+<!--
+  ============================================================================
+  BUS PASSENGER COUNTER (Generic Template)
+  ============================================================================
+  Single-file web app for bus drivers to tally boardings/exits during a shift.
+  Designed for tablets/phones mounted in the cab. Optionally tags each entry
+  with GPS coordinates and the current stop. At end of shift, exports a CSV.
+
+  Architecture notes:
+  - All state lives in plain JS variables (count, log, etc.) - no framework.
+  - The `render()` function is the single source of truth for the UI; any
+    state change should be followed by a render() call.
+  - Trip info (bus #, driver, route) persists to localStorage so the app
+    survives accidental reloads mid-shift.
+  - To customize for a new city: edit the bus/route <option> lists in the
+    HTML, and the `stopsByGroup` + `routeToGroup` objects in the JS.
+
+  Developer: Mauricio Baquero - City of Fort Luaderdale
+  ============================================================================
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<!-- maximum-scale=1 + user-scalable=no: prevent accidental pinch-zoom on a mounted tablet -->
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>Bus Passenger Counter</title>
+<style>
+  /* ----- THEMING -----
+     All colors are defined as CSS variables here so the app can flip between
+     light and dark mode by setting `data-theme="dark"` on <html>. To rebrand
+     the app, change these variables; you should not need to touch individual
+     selectors. The :root block is the LIGHT theme defaults. */
+  :root {
+    --bg-page: #f4f6f8;
+    --bg-card: #ffffff;
+    --bg-subtle: #f8f9fa;
+    --bg-hover: #eef2f5;
+    --text-primary: #222;
+    --text-secondary: #555;
+    --text-tertiary: #777;
+    --text-muted: #aaa;
+    --border: #ddd;
+    --border-soft: #eee;
+    --border-softer: #f0f0f0;
+    --accent: #3498db;
+    --accent-soft: #5499c7;
+    --accent-tint: #e8f4fd;
+    --accent-text: #2980b9;
+    --green-1: #2ecc71;
+    --green-2: #27ae60;
+    --red-1: #e74c3c;
+    --red-2: #c0392b;
+    --invalid-bg: #fef5f4;
+    --shadow-sm: 0 2px 6px rgba(0,0,0,0.06);
+    --shadow-md: 0 2px 8px rgba(0,0,0,0.06);
+    --shadow-lg: 0 4px 12px rgba(0,0,0,0.08);
+    --shadow-btn: 0 4px 12px rgba(0,0,0,0.15);
+    --shadow-btn-active: 0 2px 6px rgba(0,0,0,0.15);
+  }
+  /* Dark theme overrides - applied when <html data-theme="dark"> is set */
+  [data-theme="dark"] {
+    --bg-page: #1a1d21;
+    --bg-card: #25292e;
+    --bg-subtle: #2c3138;
+    --bg-hover: #353b43;
+    --text-primary: #e8eaed;
+    --text-secondary: #b8bcc2;
+    --text-tertiary: #989ca3;
+    --text-muted: #6b7079;
+    --border: #3a3f47;
+    --border-soft: #2f343b;
+    --border-softer: #2a2f36;
+    --accent: #5dade2;
+    --accent-soft: #7fb8db;
+    --accent-tint: #1e3a52;
+    --accent-text: #85c1e9;
+    --invalid-bg: #3a1f1d;
+    --shadow-sm: 0 2px 6px rgba(0,0,0,0.3);
+    --shadow-md: 0 2px 8px rgba(0,0,0,0.3);
+    --shadow-lg: 0 4px 12px rgba(0,0,0,0.4);
+    --shadow-btn: 0 4px 12px rgba(0,0,0,0.5);
+    --shadow-btn-active: 0 2px 6px rgba(0,0,0,0.5);
+  }
+  /* Reset margins/padding and disable the gray tap highlight on mobile */
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+
+  /* Lock the page to the viewport so drivers can't accidentally scroll the body
+     while tapping. The activity log has its own internal scroll. */
+  html, body {
+    touch-action: manipulation;
+    -webkit-text-size-adjust: 100%;
+    overscroll-behavior: none;
+    overflow: hidden;
+    height: 100%;
+  }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg-page);
+    color: var(--text-primary);
+    padding: 20px;
+    height: 100vh;
+    overflow: hidden;
+  }
+  /* Two-column layout: left sidebar (current stop + side counters) and
+     main column (boarding controls, log). Stacks vertically on mobile. */
+  .layout {
+    display: flex;
+    gap: 20px;
+    align-items: flex-start;
+    justify-content: center;
+    max-width: 1200px;
+    margin: 0 auto;
+  }
+  .left-column {
+    width: 240px;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    position: sticky;
+    top: 20px;
+  }
+  .sidebar {
+    background: var(--bg-card);
+    border-radius: 16px;
+    padding: 16px;
+    box-shadow: var(--shadow-lg);
+  }
+  .sidebar.hidden { display: none; }
+  .side-counters {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    background: var(--bg-card);
+    border-radius: 16px;
+    padding: 16px;
+    box-shadow: var(--shadow-lg);
+  }
+  .sidebar h2 {
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 12px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .stop-card {
+    background: var(--bg-subtle);
+    border: 2px solid var(--accent);
+    border-radius: 10px;
+    padding: 16px 12px;
+    text-align: left;
+    margin-bottom: 10px;
+    min-height: 90px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+  }
+  .stop-card.empty {
+    border-color: var(--border);
+    color: var(--text-muted);
+    font-style: italic;
+    font-size: 0.85rem;
+  }
+  .stop-card .stop-id {
+    font-size: 0.8rem;
+    color: var(--accent-soft);
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    margin-bottom: 6px;
+  }
+  .stop-card .stop-name {
+    font-size: 1rem;
+    color: var(--accent-text);
+    font-weight: 600;
+    line-height: 1.3;
+    word-wrap: break-word;
+  }
+  .stop-nav {
+    display: flex;
+    gap: 8px;
+  }
+  .nav-btn {
+    flex: 1;
+    padding: 28px 0;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: 1.8rem;
+    color: var(--text-primary);
+    cursor: pointer;
+    font-family: inherit;
+    line-height: 1;
+    touch-action: manipulation;
+  }
+  .nav-btn:active { background: var(--bg-hover); }
+  .nav-btn:disabled {
+    color: var(--text-muted);
+    cursor: not-allowed;
+    background: var(--bg-subtle);
+  }
+  .counter-card {
+    background: var(--bg-subtle);
+    border: 1px solid var(--border-soft);
+    border-radius: 10px;
+    padding: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    cursor: pointer;
+    user-select: none;
+    touch-action: manipulation;
+    font-family: inherit;
+    width: 100%;
+    text-align: left;
+  }
+  .counter-card:active { background: var(--bg-hover); }
+  .counter-card .counter-info {
+    display: flex;
+    flex-direction: column;
+  }
+  .counter-card .counter-label {
+    font-size: 0.7rem;
+    color: var(--text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 2px;
+  }
+  .counter-card .counter-name {
+    font-size: 1rem;
+    color: var(--text-primary);
+    font-weight: 600;
+  }
+  .counter-card .counter-value {
+    font-size: 1.8rem;
+    font-weight: 700;
+    color: var(--accent);
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
+  }
+  .main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    max-width: 600px;
+  }
+  /* On phones, drop the side-by-side layout and stack everything vertically */
+  @media (max-width: 768px) {
+    .layout { flex-direction: column; align-items: stretch; }
+    .left-column { width: 100%; position: static; }
+    .main { max-width: 100%; }
+  }
+  .trip-info {
+    width: 100%;
+    max-width: 600px;
+    background: var(--bg-card);
+    border-radius: 12px;
+    padding: 14px;
+    box-shadow: var(--shadow-md);
+    margin-bottom: 16px;
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .trip-field {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-width: 140px;
+  }
+  .trip-field label {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--text-tertiary);
+    margin-bottom: 4px;
+  }
+  .trip-field input,
+  .trip-field select {
+    font-size: 16px;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    outline: none;
+    color: var(--text-primary);
+    background: var(--bg-card);
+    font-family: inherit;
+  }
+  .trip-field input:focus,
+  .trip-field select:focus { border-color: var(--accent); }
+  .trip-field input.invalid,
+  .trip-field select.invalid {
+    border-color: var(--red-1);
+    background: var(--invalid-bg);
+  }
+  .trip-field-full { flex-basis: 100%; }
+  h1 { color: var(--text-primary); margin-bottom: 10px; font-size: 1.5rem; }
+  .count-display {
+    background: var(--bg-card);
+    border-radius: 16px;
+    padding: 30px 60px;
+    box-shadow: var(--shadow-lg);
+    margin-bottom: 20px;
+    text-align: center;
+    min-width: 250px;
+  }
+  .count-label {
+    color: var(--text-tertiary); font-size: 0.9rem; text-transform: uppercase;
+    letter-spacing: 1px; margin-bottom: 8px;
+  }
+  .count-number { font-size: 5rem; font-weight: 700; color: var(--text-primary); line-height: 1; }
+  .gps-status {
+    background: var(--bg-card);
+    border-radius: 8px;
+    padding: 8px 14px;
+    margin-bottom: 20px;
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    box-shadow: var(--shadow-sm);
+  }
+  .gps-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--border); }
+  .gps-dot.active { background: var(--green-2); box-shadow: 0 0 0 4px rgba(39,174,96,0.2); }
+  .gps-dot.error { background: var(--red-2); }
+  .buttons {
+    display: flex; gap: 20px; margin-bottom: 20px;
+    width: 100%; max-width: 600px;
+  }
+  .btn {
+    flex: 1; padding: 50px 20px; font-size: 1.5rem; font-weight: 600;
+    color: #fff; border: none; border-radius: 16px; cursor: pointer;
+    box-shadow: var(--shadow-btn);
+    transition: transform 0.1s, box-shadow 0.1s; user-select: none;
+    touch-action: manipulation;
+  }
+  .btn:active { transform: translateY(2px); box-shadow: var(--shadow-btn-active); }
+  .btn:disabled {
+    background: var(--bg-subtle) !important;
+    color: var(--text-muted);
+    cursor: not-allowed;
+    box-shadow: none;
+    transform: none;
+  }
+  .btn:disabled:active { transform: none; box-shadow: none; }
+  .btn-green { background: linear-gradient(135deg, var(--green-1), var(--green-2)); }
+  .btn-red { background: linear-gradient(135deg, var(--red-1), var(--red-2)); }
+  .controls {
+    display: flex; gap: 10px; margin-bottom: 20px;
+    flex-wrap: wrap; justify-content: center;
+  }
+  .control-btn {
+    padding: 8px 16px; background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: 8px; cursor: pointer; font-size: 0.9rem; color: var(--text-secondary);
+    font-family: inherit;
+  }
+  .control-btn:hover { background: var(--bg-hover); }
+  .control-btn:disabled {
+    color: var(--text-muted);
+    cursor: not-allowed;
+    background: var(--bg-subtle);
+  }
+  .control-btn:disabled:hover { background: var(--bg-subtle); }
+  .log {
+    width: 100%; max-width: 600px; background: var(--bg-card);
+    border-radius: 16px; padding: 20px;
+    box-shadow: var(--shadow-lg);
+    max-height: 400px; overflow-y: auto;
+  }
+  .log h2 {
+    font-size: 1rem; color: var(--text-secondary); margin-bottom: 12px;
+    padding-bottom: 8px; border-bottom: 1px solid var(--border-soft);
+  }
+  .log-item { padding: 10px 8px; border-bottom: 1px solid var(--border-softer); font-size: 0.95rem; }
+  .log-item:last-child { border-bottom: none; }
+  .log-row { display: flex; justify-content: space-between; align-items: center; }
+  .log-item .action { font-weight: 600; }
+  .log-item.on .action { color: var(--green-2); }
+  .log-item.off .action { color: var(--red-2); }
+  .log-item .time { color: var(--text-tertiary); font-variant-numeric: tabular-nums; }
+  .log-coords {
+    color: var(--text-tertiary); font-size: 0.8rem; margin-top: 4px;
+    font-variant-numeric: tabular-nums;
+  }
+  .log-coords a { color: var(--accent); text-decoration: none; }
+  .empty { text-align: center; color: var(--text-muted); padding: 20px; font-style: italic; }
+</style>
+</head>
+<body>
+  <div class="layout">
+    <!-- LEFT COLUMN: current stop indicator + accessibility counters -->
+    <div class="left-column">
+    <!-- Current Stop sidebar - shows the stop the driver is currently AT.
+         Hidden when GPS is active (GPS is assumed to capture location instead). -->
+    <aside class="sidebar" id="sidebar">
+      <h2 id="sidebarHeading">Current Stop</h2>
+      <div id="stopList"></div>
+    </aside>
+
+    <!-- Side counters for wheelchairs and bicycles. These tap-to-add cards
+         increment independently of the main passenger count and produce
+         their own log entries. -->
+    <div class="side-counters">
+      <button class="counter-card" id="counterWheelchair" type="button">
+        <div class="counter-info">
+          <div class="counter-label">Tap to add</div>
+          <div class="counter-name">♿ Wheelchairs</div>
+        </div>
+        <div class="counter-value" id="wheelchairCount">0</div>
+      </button>
+      <button class="counter-card" id="counterBicycle" type="button">
+        <div class="counter-info">
+          <div class="counter-label">Tap to add</div>
+          <div class="counter-name">🚲 Bicycles</div>
+        </div>
+        <div class="counter-value" id="bicycleCount">0</div>
+      </button>
+    </div>
+    </div>
+
+    <!-- MAIN COLUMN: trip info form, passenger count, action buttons, log -->
+    <div class="main">
+      <!-- Trip info: bus #, driver name, route. All three are required before
+           any boarding action can be logged see validateTripInfo(). -->
+      <div class="trip-info">
+    <div class="trip-field trip-field-full">
+      <label for="busNumber">Bus #</label>
+      <select id="busNumber">
+        <option value="">Select bus...</option>
+        <option>Bus 1</option>
+        <option>Bus 2</option>
+        <option>Bus 3</option>
+      </select>
+    </div>
+    <div class="trip-field">
+      <label for="driverName">Driver Name</label>
+      <input type="text" id="driverName" autocomplete="off" placeholder="e.g. J. Smith">
+    </div>
+    <div class="trip-field">
+      <label for="route">Route</label>
+      <select id="route">
+        <option value="">Select route...</option>
+        <option>Route 1</option>
+        <option>Route 2</option>
+        <option>Route 3</option>
+      </select>
+    </div>
+  </div>
+
+  <h1>Bus Passenger Counter</h1>
+
+  <!-- Live passenger count display - updated by render() whenever count changes -->
+  <div class="count-display">
+    <div class="count-label">Passengers on Bus</div>
+    <div class="count-number" id="count">0</div>
+  </div>
+
+  <!-- GPS status indicator. Dot color reflects state: gray (off), green (active), red (error) -->
+  <div class="gps-status">
+    <span class="gps-dot" id="gpsDot"></span>
+    <span id="gpsText">GPS off</span>
+  </div>
+
+  <!-- Primary action buttons. Large tap targets (50px padding) for use while driving. -->
+  <div class="buttons">
+    <button class="btn btn-green" id="btnOn">+ Board</button>
+    <button class="btn btn-red" id="btnOff">- Exit</button>
+  </div>
+
+  <!-- Secondary controls: GPS toggle, theme switch, undo last entry, end shift -->
+  <div class="controls">
+    <button class="control-btn" id="btnGps">Enable GPS</button>
+    <button class="control-btn" id="btnTheme" aria-label="Toggle theme">🌙 Dark</button>
+    <button class="control-btn" id="btnUndo" disabled>Undo</button>
+    <button class="control-btn" id="btnEndShift">End Shift</button>
+  </div>
+
+  <!-- Activity log - chronological list of every boarding/exit event.
+       Populated dynamically by render() from the `log` array. -->
+  <div class="log">
+    <h2>Activity Log</h2>
+    <div id="logList">
+      <div class="empty">No activity yet</div>
+    </div>
+  </div>
+    </div>
+  </div>
+
+<script>
+  // Block double-tap zoom on iOS Safari (CSS touch-action handles most cases, this is the fallback)
+  let lastTouchEnd = 0;
+  document.addEventListener('touchend', (e) => {
+    const now = Date.now();
+    if (now - lastTouchEnd <= 350) e.preventDefault();
+    lastTouchEnd = now;
+  }, { passive: false });
+  // Block pinch zoom
+  document.addEventListener('gesturestart', (e) => e.preventDefault());
+
+  // Theme: load saved preference, fall back to system, then wire up the toggle
+  const btnTheme = document.getElementById('btnTheme');
+  function applyTheme(theme) {
+    document.documentElement.setAttribute('data-theme', theme);
+    btnTheme.textContent = theme === 'dark' ? '☀️ Light' : '🌙 Dark';
+  }
+  const savedTheme = localStorage.getItem('theme');
+  const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+  applyTheme(savedTheme || (prefersDark ? 'dark' : 'light'));
+  btnTheme.addEventListener('click', () => {
+    const next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+    applyTheme(next);
+    localStorage.setItem('theme', next);
+  });
+
+  // ============================================================
+  // APPLICATION STATE
+  // ============================================================
+  // These plain JS variables hold the entire app state. There's no
+  // framework or store - whenever any of these change, call render()
+  // to update the UI.
+  let count = 0;             // Passengers currently on the bus (boarded minus exited)
+  let log = [];              // Chronological list of all entries this shift (oldest first)
+  let lastPosition = null;   // Most recent GPS reading: { lat, lng, accuracy } or null
+  let watchId = null;        // ID returned by geolocation.watchPosition; null when GPS off
+  let selectedStop = null;   // The stop the bus is currently at: { id, name, idx } or null
+  let stopIndex = 0;         // Position in the current route's stop list (drives nav arrows)
+  let wheelchairCount = 0;   // Total wheelchair boardings this shift
+  let bicycleCount = 0;      // Total bicycle boardings this shift
+
+  // ============================================================
+  // DOM REFERENCES
+  // ============================================================
+  // Cache element lookups once at startup so we're not calling
+  // getElementById() on every render.
+  const countEl = document.getElementById('count');
+  const logListEl = document.getElementById('logList');
+  const gpsDot = document.getElementById('gpsDot');
+  const gpsText = document.getElementById('gpsText');
+  const btnGps = document.getElementById('btnGps');
+  const sidebarEl = document.getElementById('sidebar');
+  const stopListEl = document.getElementById('stopList');
+  const sidebarHeading = document.getElementById('sidebarHeading');
+  const wheelchairCountEl = document.getElementById('wheelchairCount');
+  const bicycleCountEl = document.getElementById('bicycleCount');
+  const busNumberEl = document.getElementById('busNumber');
+  const driverNameEl = document.getElementById('driverName');
+  const routeEl = document.getElementById('route');
+
+  // Persist bus #, driver name, and route across reloads so the driver doesn't retype every shift.
+  // localStorage is per-browser per-domain, so each tablet keeps its own values.
+  busNumberEl.value = localStorage.getItem('busNumber') || '';
+  driverNameEl.value = localStorage.getItem('driverName') || '';
+  routeEl.value = localStorage.getItem('route') || '';
+  busNumberEl.addEventListener('change', () => localStorage.setItem('busNumber', busNumberEl.value));
+  driverNameEl.addEventListener('input', () => localStorage.setItem('driverName', driverNameEl.value));
+  routeEl.addEventListener('change', () => localStorage.setItem('route', routeEl.value));
+
+  // ============================================================
+  // ROUTE & STOP DATA (CUSTOMIZE HERE FOR YOUR CITY)
+  // ============================================================
+  // `stopsByGroup` defines the ordered list of stops for each route group.
+  // Each stop has an `id` (string, used in the CSV export) and a `name`
+  // (shown to the driver). Order matters - it's the sequence drivers
+  // navigate through using the prev/next arrows.
+  //
+  // The "group" indirection (vs. mapping directly from route to stops)
+  // exists so multiple route variants can share one stop list - e.g. if
+  // "Beach Link 1" and "Beach Link 2" both run the same physical loop,
+  // they can both point at the same group.
+  const stopsByGroup = {
+    'Route 1': [
+      { id: '101', name: 'Stop 1' },
+      { id: '102', name: 'Stop 2' },
+      { id: '103', name: 'Stop 3' }
+    ],
+    'Route 2': [
+      { id: '201', name: 'Stop 1' },
+      { id: '202', name: 'Stop 2' },
+      { id: '203', name: 'Stop 3' }
+    ],
+    'Route 3': [
+      { id: '301', name: 'Stop 1' },
+      { id: '302', name: 'Stop 2' },
+      { id: '303', name: 'Stop 3' }
+    ]
+  };
+
+  // Maps each route name (the value of the route <select>) to a key in
+  // stopsByGroup. Multiple routes can map to the same group if they share
+  // a stop list. The route name on the left MUST match a route <option>
+  // in the HTML exactly.
+  const routeToGroup = {
+    'Route 1': 'Route 1',
+    'Route 2': 'Route 2',
+    'Route 3': 'Route 3'
+  };
+
+  // ============================================================
+  // STOP NAVIGATION
+  // ============================================================
+
+  // Returns the array of stops for whatever route is currently selected,
+  // or [] if no route (or an unmapped route) is selected.
+  function getCurrentStops() {
+    const group = routeToGroup[routeEl.value];
+    return group ? (stopsByGroup[group] || []) : [];
+  }
+
+  // Renders the "Current Stop" sidebar card and prev/next arrows based on
+  // the current route + stopIndex. Also updates `selectedStop` so any
+  // boarding action logged next will be tagged with this stop.
+  function renderStops() {
+    const list = getCurrentStops();
+    if (list.length === 0) {
+      // No route selected (or route has no stops) - show placeholder
+      sidebarHeading.textContent = 'Current Stop';
+      stopListEl.innerHTML = '<div class="stop-card empty">Select a route to see stops</div>';
+      return;
+    }
+    // Defensive: keep stopIndex within bounds in case the stops list
+    // shrank since last render (e.g. the driver switched routes).
+    if (stopIndex < 0) stopIndex = 0;
+    if (stopIndex >= list.length) stopIndex = list.length - 1;
+    const stop = list[stopIndex];
+    stopListEl.innerHTML =
+      '<div class="stop-card">' +
+        '<div class="stop-name">' + stop.name + '</div>' +
+      '</div>' +
+      '<div class="stop-nav">' +
+        '<button class="nav-btn" id="navPrev"' + (stopIndex === 0 ? ' disabled' : '') + '>&larr;</button>' +
+        '<button class="nav-btn" id="navNext"' + (stopIndex === list.length - 1 ? ' disabled' : '') + '>&rarr;</button>' +
+      '</div>';
+    sidebarHeading.textContent = stop.id ? 'Current Stop: ' + stop.id : 'Current Stop';
+    // Sync selectedStop so the next log entry uses the displayed stop
+    selectedStop = { id: stop.id, name: stop.name, idx: stopIndex };
+  }
+
+  // Event delegation: one listener on the parent catches clicks on either
+  // arrow button. Cheaper than re-binding listeners after every renderStops().
+  stopListEl.addEventListener('click', (e) => {
+    const list = getCurrentStops();
+    if (list.length === 0) return;
+    if (e.target.id === 'navPrev' && stopIndex > 0) {
+      stopIndex--;
+      renderStops();
+    } else if (e.target.id === 'navNext' && stopIndex < list.length - 1) {
+      stopIndex++;
+      renderStops();
+    }
+  });
+
+  // When the driver picks a different route, reset to the first stop of
+  // the new route and re-render the sidebar.
+  routeEl.addEventListener('change', () => {
+    stopIndex = 0;
+    selectedStop = null;
+    renderStops();
+  });
+
+  // Initial paint of the stop sidebar (in case a route was restored from localStorage)
+  renderStops();
+
+  // ============================================================
+  // GPS & TIME UTILITIES
+  // ============================================================
+
+  // Formats a Date as a 24-hour-ish "HH:MM:SS" string using the browser's locale
+  function formatTime(date) {
+    return date.toLocaleTimeString([], {
+      hour: '2-digit', minute: '2-digit', second: '2-digit'
+    });
+  }
+
+  // Updates the GPS status indicator. `state` is '', 'active', or 'error'
+  // (these are the CSS modifier classes for the colored dot).
+  function setGpsStatus(state, message) {
+    gpsDot.className = 'gps-dot' + (state ? ' ' + state : '');
+    gpsText.textContent = message;
+  }
+
+  // Begins watching GPS position. We use watchPosition (not getCurrentPosition)
+  // so `lastPosition` updates continuously - every boarding gets a fresh
+  // reading without the driver tapping anything. Hides the stop sidebar
+  // because GPS is assumed to be the location source while it's on.
+  function startGps() {
+    if (!('geolocation' in navigator)) {
+      setGpsStatus('error', 'GPS not supported on this device');
+      return;
+    }
+    setGpsStatus('', 'Requesting location...');
+    sidebarEl.classList.add('hidden');
+    watchId = navigator.geolocation.watchPosition(
+      (pos) => {
+        // Success callback - fires every time the device gets a new fix
+        lastPosition = {
+          lat: pos.coords.latitude,
+          lng: pos.coords.longitude,
+          accuracy: pos.coords.accuracy
+        };
+        setGpsStatus('active', 'GPS active (accuracy ' + Math.round(pos.coords.accuracy) + 'm)');
+        btnGps.textContent = 'Disable GPS';
+      },
+      (err) => {
+        // Error callback - permission denied, timeout, position unavailable
+        setGpsStatus('error', 'GPS error: ' + err.message);
+        lastPosition = null;
+        sidebarEl.classList.remove('hidden');
+      },
+      // enableHighAccuracy: prefer GPS over wifi/cell; maximumAge: accept
+      // a cached fix up to 5s old; timeout: give up after 15s on first fix
+      { enableHighAccuracy: true, maximumAge: 5000, timeout: 15000 }
+    );
+  }
+
+  // Stops the GPS watcher and shows the stop sidebar again so the driver
+  // can manually tag entries with a stop instead.
+  function stopGps() {
+    if (watchId !== null) {
+      navigator.geolocation.clearWatch(watchId);
+      watchId = null;
+    }
+    lastPosition = null;
+    setGpsStatus('', 'GPS off');
+    btnGps.textContent = 'Enable GPS';
+    sidebarEl.classList.remove('hidden');
+  }
+
+  // ============================================================
+  // RENDER
+  // ============================================================
+  // Single source of truth for the UI. Reads current state and writes
+  // it into the DOM. Call this after ANY state change (count++, log.push,
+  // etc.) to keep the screen in sync. Cheap because the log is small.
+  function render() {
+    // Sync the three numeric displays
+    countEl.textContent = count;
+    wheelchairCountEl.textContent = wheelchairCount;
+    bicycleCountEl.textContent = bicycleCount;
+
+    // Button enable/disable rules:
+    //   Undo: nothing to undo if log is empty
+    //   Exit: can't exit a passenger if no one is on the bus
+    //   End Shift: can only end when count is 0 (everyone has exited)
+    document.getElementById('btnUndo').disabled = log.length === 0;
+    document.getElementById('btnOff').disabled = count <= 0;
+    document.getElementById('btnEndShift').disabled = count !== 0;
+
+    if (log.length === 0) {
+      logListEl.innerHTML = '<div class="empty">No activity yet</div>';
+      return;
+    }
+
+    // Render the log newest-first (slice() to avoid mutating the original
+    // array with reverse(), which would scramble chronological order).
+    logListEl.innerHTML = log.slice().reverse().map(entry => {
+      const stopLabel = entry.stop
+        ? (entry.stopId ? entry.stopId + ' - ' + entry.stop : entry.stop)
+        : '';
+      // If GPS coords are present, show a clickable Google Maps link.
+      // Otherwise fall back to "GPS off · <stop>" or a plain "GPS off" message.
+      const coordsHtml = entry.lat != null
+        ? '<div class="log-coords"><a href="https://www.google.com/maps?q=' +
+          entry.lat + ',' + entry.lng + '" target="_blank">' +
+          entry.lat.toFixed(5) + ', ' + entry.lng.toFixed(5) +
+          ' (±' + Math.round(entry.accuracy) + 'm)</a></div>'
+        : stopLabel
+          ? '<div class="log-coords">GPS off &middot; ' + stopLabel + '</div>'
+          : '<div class="log-coords">GPS off &middot; No stop selected</div>';
+      // Map internal entry type to a display label and CSS color class
+      let actionText, actionClass;
+      if (entry.type === 'on') { actionText = 'Boarded'; actionClass = 'on'; }
+      else if (entry.type === 'off') { actionText = 'Exited'; actionClass = 'off'; }
+      else if (entry.type === 'wheelchair') { actionText = '♿ Wheelchair'; actionClass = 'on'; }
+      else if (entry.type === 'bicycle') { actionText = '🚲 Bicycle'; actionClass = 'on'; }
+      return '<div class="log-item ' + actionClass + '">' +
+        '<div class="log-row">' +
+          '<span class="action">' + actionText + '</span>' +
+          '<span class="time">' + entry.time + '</span>' +
+        '</div>' + coordsHtml + '</div>';
+    }).join('');
+  }
+
+  // ============================================================
+  // VALIDATION
+  // ============================================================
+  // All three trip-info fields must be filled before any boarding action
+  // can be logged. Returns true if valid, false otherwise (and shows
+  // an alert + red-highlights the missing fields).
+  function validateTripInfo() {
+    const bus = busNumberEl.value.trim();
+    const driver = driverNameEl.value.trim();
+    const route = routeEl.value;
+    const missing = [];
+    busNumberEl.classList.toggle('invalid', !bus);
+    driverNameEl.classList.toggle('invalid', !driver);
+    routeEl.classList.toggle('invalid', !route);
+    if (!bus) missing.push('Bus #');
+    if (!driver) missing.push('Driver Name');
+    if (!route) missing.push('Route');
+    if (missing.length > 0) {
+      alert('Please fill out: ' + missing.join(', '));
+      return false;
+    }
+    return true;
+  }
+
+  // Clear the red invalid-highlight as soon as the driver fills each field
+  busNumberEl.addEventListener('change', () => busNumberEl.classList.remove('invalid'));
+  driverNameEl.addEventListener('input', () => driverNameEl.classList.remove('invalid'));
+  routeEl.addEventListener('change', () => routeEl.classList.remove('invalid'));
+
+  // ============================================================
+  // LOG ENTRIES & ACTION HANDLERS
+  // ============================================================
+
+  // Pushes a new entry to the log array. `type` is one of:
+  //   'on'         - passenger boarded
+  //   'off'        - passenger exited
+  //   'wheelchair' - wheelchair boarded
+  //   'bicycle'    - bicycle loaded
+  // Each entry captures a full snapshot (bus, driver, route, stop, GPS, time)
+  // so the CSV export is self-contained per row.
+  function addEntry(type) {
+    if (!validateTripInfo()) return false;
+    const entry = {
+      type,
+      time: formatTime(new Date()),
+      iso: new Date().toISOString(),         // Machine-readable timestamp for the CSV
+      bus: busNumberEl.value.trim(),
+      driver: driverNameEl.value.trim(),
+      route: routeEl.value,
+      stopId: selectedStop ? selectedStop.id : '',
+      stop: selectedStop ? selectedStop.name : '',
+      lat: lastPosition ? lastPosition.lat : null,
+      lng: lastPosition ? lastPosition.lng : null,
+      accuracy: lastPosition ? lastPosition.accuracy : null
+    };
+    log.push(entry);
+    render();
+    return true;
+  }
+
+  // + Board: increment the on-bus count and log a boarding entry
+  document.getElementById('btnOn').addEventListener('click', () => {
+    if (!validateTripInfo()) return;
+    count++;
+    addEntry('on');
+  });
+
+  // - Exit: decrement the on-bus count (guarded against going below 0) and log an exit
+  document.getElementById('btnOff').addEventListener('click', () => {
+    if (count <= 0) return;
+    if (!validateTripInfo()) return;
+    count--;
+    addEntry('off');
+  });
+
+  // Wheelchair counter card - tap to log a wheelchair boarding
+  document.getElementById('counterWheelchair').addEventListener('click', () => {
+    if (!validateTripInfo()) return;
+    wheelchairCount++;
+    addEntry('wheelchair');
+  });
+
+  // Bicycle counter card - tap to log a bicycle loading
+  document.getElementById('counterBicycle').addEventListener('click', () => {
+    if (!validateTripInfo()) return;
+    bicycleCount++;
+    addEntry('bicycle');
+  });
+
+  // Undo: removes the most recent log entry and reverses its effect on
+  // whichever counter it incremented. Only one level of undo (no redo stack).
+  document.getElementById('btnUndo').addEventListener('click', () => {
+    if (log.length === 0) return;
+    const last = log.pop();
+    if (last.type === 'on') count--;
+    else if (last.type === 'off') count++;
+    else if (last.type === 'wheelchair') wheelchairCount--;
+    else if (last.type === 'bicycle') bicycleCount--;
+    render();
+  });
+
+  // GPS toggle - flips between starting and stopping the location watcher
+  btnGps.addEventListener('click', () => {
+    if (watchId === null) startGps();
+    else stopGps();
+  });
+
+  // ============================================================
+  // CSV EXPORT
+  // ============================================================
+  // Builds a CSV from the log array and triggers a browser download.
+  // Filename pattern: <Route>_<Bus>_<YYYY-MM-DD>.csv
+  function downloadLogCsv() {
+    // CSV escape helper: wraps values in quotes and doubles any embedded
+    // quotes if the value contains a comma, quote, or newline.
+    const escape = (v) => {
+      const s = String(v == null ? '' : v);
+      return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+    };
+    // Internal type code -> human-readable label for the CSV
+    const actionLabel = (t) => {
+      if (t === 'on') return 'Boarded';
+      if (t === 'off') return 'Exited';
+      if (t === 'wheelchair') return 'Wheelchair';
+      if (t === 'bicycle') return 'Bicycle';
+      return t;
+    };
+    // First row is the header; subsequent rows are entries
+    const rows = [['Bus #', 'Driver', 'Route', 'Stop #', 'Stop', 'Action', 'Time', 'ISO Timestamp', 'Latitude', 'Longitude', 'Accuracy (m)']];
+    log.forEach(e => rows.push([
+      e.bus,
+      e.driver,
+      e.route,
+      e.stopId,
+      e.stop,
+      actionLabel(e.type),
+      e.time,
+      e.iso,
+      e.lat != null ? e.lat : '',
+      e.lng != null ? e.lng : '',
+      e.accuracy != null ? Math.round(e.accuracy) : ''
+    ]));
+    const csv = rows.map(r => r.map(escape).join(',')).join('\n');
+
+    // Standard "create blob -> object URL -> click hidden anchor" download pattern
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    // Sanitize route and bus number for filename: replace spaces/slashes with
+    // underscores, then strip anything that isn't alphanumeric/underscore/hyphen
+    const sanitize = (s) => (s || '').trim().replace(/[\s\/\\]+/g, '_').replace(/[^a-zA-Z0-9_-]/g, '');
+    const route = sanitize(routeEl.value) || 'Route';
+    const bus = sanitize(busNumberEl.value) || 'Bus';
+    const date = new Date().toISOString().split('T')[0];
+    a.href = url;
+    a.download = route + '_' + bus + '_' + date + '.csv';
+    a.click();
+    URL.revokeObjectURL(url); // Free the blob memory once the click is done
+  }
+
+  // End Shift: downloads the CSV and resets all state for the next shift.
+  // Requires the bus to be empty (count === 0) and a typed confirmation
+  // phrase to prevent accidental data loss.
+  document.getElementById('btnEndShift').addEventListener('click', () => {
+    if (count !== 0) {
+      alert('Cannot end shift: ' + count + ' passenger(s) still on the bus.');
+      return;
+    }
+    if (log.length === 0 && count === 0 && wheelchairCount === 0 && bicycleCount === 0) {
+      alert('Nothing to end. No activity recorded.');
+      return;
+    }
+    const response = prompt(
+      'This will download the CSV and reset all counts and the activity log for the next shift.\n\n' +
+      'Type "End shift" to confirm:'
+    );
+    if (response === null) return; // Driver cancelled the prompt
+    if (response.trim().toLowerCase() !== 'end shift') {
+      alert('End shift cancelled. The phrase did not match.');
+      return;
+    }
+    if (log.length > 0) downloadLogCsv();
+    // Reset all counters and the log for the next shift
+    count = 0;
+    wheelchairCount = 0;
+    bicycleCount = 0;
+    log = [];
+    render();
+  });
+
+  // Initial paint - draws the empty state when the app first loads
+  render();
+</script>
+</body>
+</html>
