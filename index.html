@@ -12,10 +12,10 @@
     state change should be followed by a render() call.
   - Trip info (bus #, driver, route) persists to localStorage so the app
     survives accidental reloads mid-shift.
-  - To customize for a new city: edit the bus/route <option> lists in the
-    HTML, and the `stopsByGroup` + `routeToGroup` objects in the JS.
-
-  Developer: Mauricio Baquero - City of Fort Luaderdale
+  - To customize for a new city: edit the single `agencyData` object near
+    the top of the script tag. It defines the bus list and the route groups
+    (each group containing its routes and ordered stop list). The dropdowns
+    and stop navigation are all driven from that one object.
   ============================================================================
 -->
 <!DOCTYPE html>
@@ -196,11 +196,6 @@
     touch-action: manipulation;
   }
   .nav-btn:active { background: var(--bg-hover); }
-  .nav-btn:disabled {
-    color: var(--text-muted);
-    cursor: not-allowed;
-    background: var(--bg-subtle);
-  }
   /* Shown under the current-stop card when GPS is auto-selecting the stop */
   .stop-distance {
     text-align: center;
@@ -581,7 +576,12 @@
   //
   //   buses: ........... array of bus identifiers shown in the Bus # dropdown
   //   routeGroups: ..... object keyed by group name. Each group has:
-  //     routes: ........ array of route names shown in the Route dropdown
+  //     routes: ........ array of route name suffixes within this group.
+  //                      The dropdown and CSV use "<group> <route>" combined,
+  //                      e.g. group "Downtown" + route "Link 1" displays and
+  //                      exports as "Downtown Link 1". Keep the suffixes
+  //                      short ("Link 1", "Express A") to avoid duplicating
+  //                      the group name in the data.
   //     stops: ......... ordered array of stops the driver navigates through
   //                      with the prev/next arrows. Each stop has:
   //                        id ..... string used in the CSV export
@@ -613,27 +613,27 @@
     ],
     routeGroups: {
       'Group 1': {
-        routes: ['Route 1'],
+        routes: ['Link 1'],
         stops: [
-          { id: '101', name: 'Stop 1', lat: 26.1224, lng: -80.1373 },
-          { id: '102', name: 'Stop 2', lat: 26.1230, lng: -80.1380 },
-          { id: '103', name: 'Stop 3', lat: 26.1236, lng: -80.1387 }
+          { id: '101', name: 'Stop 1', lat: null, lng: null },
+          { id: '102', name: 'Stop 2', lat: null, lng: null },
+          { id: '103', name: 'Stop 3', lat: null, lng: null }
         ]
       },
       'Group 2': {
-        routes: ['Route 2'],
+        routes: ['Link 1'],
         stops: [
-          { id: '201', name: 'Stop 1', lat: 26.1242, lng: -80.1394 },
-          { id: '202', name: 'Stop 2', lat: 26.1248, lng: -80.1401 },
-          { id: '203', name: 'Stop 3', lat: 26.1254, lng: -80.1408 }
+          { id: '201', name: 'Stop 1', lat: null, lng: null },
+          { id: '202', name: 'Stop 2', lat: null, lng: null },
+          { id: '203', name: 'Stop 3', lat: null, lng: null }
         ]
       },
       'Group 3': {
-        routes: ['Route 3'],
+        routes: ['Link 1'],
         stops: [
-          { id: '301', name: 'Stop 1', lat: 26.1260, lng: -80.1415 },
-          { id: '302', name: 'Stop 2', lat: 26.1266, lng: -80.1422 },
-          { id: '303', name: 'Stop 3', lat: 26.1272, lng: -80.1429 }
+          { id: '301', name: 'Stop 1', lat: null, lng: null },
+          { id: '302', name: 'Stop 2', lat: null, lng: null },
+          { id: '303', name: 'Stop 3', lat: null, lng: null }
         ]
       }
     }
@@ -642,20 +642,28 @@
   // ----- Derive lookup maps and populate dropdowns from agencyData -----
   // We keep the same `stopsByGroup` and `routeToGroup` shapes the rest of
   // the code already expects, so nothing downstream has to change.
+  //
+  // Note on naming: agencyData stores route names as short suffixes inside
+  // each group (e.g. "Link 1" inside the "Downtown" group). Here we combine
+  // group + suffix into the full display name ("Downtown Link 1") which
+  // becomes the canonical identifier - shown in the dropdown, written to
+  // the CSV's Route column, and used as the routeToGroup lookup key.
+  // This avoids repeating the group name on every route in the data.
 
   // stopsByGroup: { groupName: [stops...] }
   const stopsByGroup = {};
-  // routeToGroup: { routeName: groupName }
+  // routeToGroup: { fullRouteName: groupName }
   const routeToGroup = {};
-  // Ordered list of route names for populating the Route dropdown
+  // Ordered list of full route names for populating the Route dropdown
   const allRoutes = [];
 
   Object.keys(agencyData.routeGroups).forEach(groupName => {
     const group = agencyData.routeGroups[groupName];
     stopsByGroup[groupName] = group.stops;
-    group.routes.forEach(routeName => {
-      routeToGroup[routeName] = groupName;
-      allRoutes.push(routeName);
+    group.routes.forEach(routeSuffix => {
+      const fullName = groupName + ' ' + routeSuffix;
+      routeToGroup[fullName] = groupName;
+      allRoutes.push(fullName);
     });
   });
 
@@ -772,11 +780,14 @@
       );
       extraHtml = '<div class="stop-distance">~' + distMeters + 'm away (auto from GPS)</div>';
     } else if (!gpsOn) {
-      // Manual mode - show the prev/next arrows
+      // Manual mode - show the prev/next arrows. Both wrap around: next
+      // from the last stop goes to the first, prev from the first goes to
+      // the last. This matches the loop structure of most routes (the
+      // first and last stops are usually the same physical location).
       extraHtml =
         '<div class="stop-nav">' +
-          '<button class="nav-btn" id="navPrev"' + (stopIndex === 0 ? ' disabled' : '') + '>&larr;</button>' +
-          '<button class="nav-btn" id="navNext"' + (stopIndex === list.length - 1 ? ' disabled' : '') + '>&rarr;</button>' +
+          '<button class="nav-btn" id="navPrev">&larr;</button>' +
+          '<button class="nav-btn" id="navNext">&rarr;</button>' +
         '</div>';
     }
 
@@ -792,14 +803,20 @@
 
   // Event delegation: one listener on the parent catches clicks on either
   // arrow button. Cheaper than re-binding listeners after every renderStops().
+  // Both directions wrap: tapping next on the last stop goes to the first,
+  // tapping prev on the first stop goes to the last. This matches the loop
+  // structure of most routes. The (i + n) % n pattern is the standard
+  // "circular index" idiom and handles wrap-around in both directions
+  // without explicit if/else for the boundaries.
   stopListEl.addEventListener('click', (e) => {
     const list = getCurrentStops();
     if (list.length === 0) return;
-    if (e.target.id === 'navPrev' && stopIndex > 0) {
-      stopIndex--;
+    const n = list.length;
+    if (e.target.id === 'navPrev') {
+      stopIndex = (stopIndex - 1 + n) % n;
       renderStops();
-    } else if (e.target.id === 'navNext' && stopIndex < list.length - 1) {
-      stopIndex++;
+    } else if (e.target.id === 'navNext') {
+      stopIndex = (stopIndex + 1) % n;
       renderStops();
     }
   });
