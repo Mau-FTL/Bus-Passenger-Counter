@@ -46,7 +46,7 @@ Each tap increments the running total displayed on the card and adds an entry to
 
 When a route is selected, the left sidebar shows the current stop. Behavior depends on whether GPS is enabled:
 
-- **GPS off (manual mode):** The driver navigates forward and backward through the route's stop list using prev/next arrow buttons. The displayed stop is attached to any boarding or exit entries logged while at that stop.
+- **GPS off (manual mode):** The driver navigates forward and backward through the route's stop list using prev/next arrow buttons. The displayed stop is attached to any boarding or exit entries logged while at that stop. The arrows wrap around at both ends of the list, tapping next on the final stop returns to the first stop, and tapping prev on the first returns to the last. This matches the structure of typical loop routes, where the first and last stops are the same physical location.
 - **GPS on (auto mode):** The arrows are hidden and the sidebar updates automatically to show the nearest stop based on the bus's current GPS position. A small distance readout under the stop name confirms the match (e.g. "~7m away (auto from GPS)"). When the bus is between stops or off route, the sidebar shows "No nearby stop" and log entries created in that state are not tagged with a stop ID.
 
 The matching radius, how close the bus must be for auto-mode to consider it a match, defaults to 10 meters and can be tuned per agency. See [Customizing for a Specific Agency](#customizing-for-a-specific-agency) for details.
@@ -123,7 +123,7 @@ The trip info fields (bus, driver, route) and the theme preference are the only 
 
 ## Customizing for a Specific Agency
 
-The tool ships as a generic template with three placeholder buses, three placeholder routes, and three placeholder stops per route. To deploy it for a specific agency, edit one place: the `agencyData` object near the top of the `<script>` tag in `index.html`. Everything else (the bus and route dropdowns, the stop sidebar, the nearest-stop matching) is built from this object at startup.
+The tool ships as a generic template with three placeholder buses, three placeholder route groups, and three placeholder stops per group. To deploy it for a specific agency, edit one place: the `agencyData` object near the top of the `<script>` tag in `index.html`. Everything else (the bus and route dropdowns, the stop sidebar, the nearest-stop matching) is built from this object at startup.
 
 The structure looks like this:
 
@@ -135,12 +135,12 @@ const agencyData = {
     'Bus 3'
   ],
   routeGroups: {
-    'Group 1': {
-      routes: ['Route 1'],
+    'Downtown': {
+      routes: ['Link 1', 'Link 2'],
       stops: [
         { id: '101', name: 'Stop 1', lat: 26.1224, lng: -80.1373 },
         { id: '102', name: 'Stop 2', lat: 26.1230, lng: -80.1380 },
-        { id: '103', name: 'Stop 3', lat: 26.1236, lng: -80.1387 }
+        { id: '103', name: 'Stop 3', lat: null, lng: null }
       ]
     }
   }
@@ -151,8 +151,8 @@ Each piece:
 
 - **`buses`** is the list of bus identifiers shown in the Bus # dropdown. Use whatever the agency uses internally (fleet numbers, names, or a mix).
 - **`routeGroups`** is keyed by group name. Each group contains:
-  - **`routes`** is the list of route names shown in the Route dropdown. Multiple routes in one group share the same stop list, useful when several route variants run the same physical loop. If every route has its own unique stops, just put one route per group.
-  - **`stops`** is the ordered sequence of stops the bus visits. Each stop has an `id` (used in the CSV export), a `name` (shown to the driver), and optionally a `lat` and `lng` (decimal degrees). Stops without coordinates still work; they're skipped during nearest-stop matching but appear in the sidebar like normal.
+  - **`routes`** is the list of route name suffixes within this group. The dropdown and CSV combine the group name with the suffix, so a group named `Downtown` with route `Link 1` displays and exports as `Downtown Link 1`. Keep the suffixes short (`Link 1`, `Express A`) to avoid duplicating the group name in the data. Multiple routes in one group share the same stop list, useful when several route variants run the same physical loop. If every route has unique stops, give it its own group.
+  - **`stops`** is the ordered sequence of stops the bus visits. Each stop has an `id` (used in the CSV export), a `name` (shown to the driver), and `lat` and `lng` (decimal degrees). Coordinates can be set to `null` for stops not yet geocoded; the stop still appears in the sidebar and works in manual mode, it's just skipped during GPS nearest-stop matching. This makes it easy to roll out coordinates incrementally, fill them in for one route at a time and that route gets auto-select while the others continue working in manual mode.
 
 ### Stop matching radius
 
